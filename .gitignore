@@ -2,4 +2,4 @@ __pycache__/
 chatline/
 *.yaml
 .DS_Store
-.db
+*.db
