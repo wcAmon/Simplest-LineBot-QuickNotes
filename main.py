@@ -1,9 +1,5 @@
-from datetime import datetime
+
 from typing import Annotated
-import base64
-import hashlib
-import hmac
-from multiprocessing import Process
 import uvicorn
 import yaml
 import json
@@ -12,14 +8,8 @@ from models import Base, UserInfo, MessageRecords, ProcessMessage
 from database import engine, db_session
 from handlers import ReplyMessageHandler, TextMessageHandler
 from sqlalchemy.orm import Session
+from executors import ManagerBot, ClerkBot
 
-## Load the config file
-with open('config.yaml') as file:
-    config = yaml.safe_load(file)
-## Get the channel secret from the config file
-channel_secret = config["CHANNEL_SECRET"]
-reply_endpoint = config["REPLY_ENDPOINT"]
-channel_access_token = config["CHANNEL_ACCESS_TOKEN"]
 ## Create sqlite data.db, but only if it doesn't exist
 Base.metadata.create_all(bind=engine)
 def setup_db_session():
@@ -29,13 +19,20 @@ def setup_db_session():
     finally:
         db.close()
 db_driver = Annotated[Session, Depends(setup_db_session)]
+## Load the config file
+with open('../config.yaml') as file:
+    config = yaml.safe_load(file)
+## initialize the manager bot
+managerBot = ManagerBot(Config=config, DB=db_driver)
+managerBot.online()
 ## Create a FastAPI instance
 app = FastAPI()
 
 @app.get("/", status_code = status.HTTP_200_OK)
-async def home(db: db_driver):
+async def Users(db: db_driver):
     db.query(UserInfo).all()
 
+## get user by line id
 @app.get("/users/", status_code = status.HTTP_200_OK)
 async def get_user_by_line_id(db: db_driver, lineUserId: str):
     user_object = db.query(UserInfo).filter(UserInfo.lineUserId == lineUserId).first()
@@ -45,37 +42,17 @@ async def get_user_by_line_id(db: db_driver, lineUserId: str):
 ## Define the webhook endpoint
 @app.post("/webhook", status_code = status.HTTP_200_OK)
 async def handleInboundMessage(request: Request, db: db_driver):
-    ## Validate the x-line-signature
-    body_bytes = await request.body()
-    body = body_bytes.decode('utf-8')
-    signature = request.headers.get('x-line-signature')
-    hash = hmac.new(channel_secret.encode('utf-8'),
-        body.encode('utf-8'), hashlib.sha256).digest()
-    correct_signature = base64.b64encode(hash).decode()
-    if signature != correct_signature:
-        raise HTTPException(status_code=400, detail="Invalid signature")
-    ## Parse the body and extract the message events
-    body_dict = json.loads(body)
-    events = body_dict.get("events")
-    for event in events:
-        if event.get("type") == "message":
-            line_user_id = event.get("source").get("userId")
-            time_stamp = datetime.fromtimestamp(event.get("timestamp")/1000)
-            message = event.get("message")
-            reply_token = event.get("replyToken")
-            if message.get("type") == "text":
-                handle_status = TextMessageHandler(db, line_user_id, time_stamp, message.get("text"))
-                if not handle_status.success:
-                   res = await ReplyMessageHandler(reply_endpoint, channel_access_token, reply_token, handle_status.msg.value)
-                   print("response from line server", res)
-                   return
-        else:
-            print("Event type not message")
-            return
-                    
-    res = await ReplyMessageHandler(reply_endpoint, channel_access_token, reply_token, ProcessMessage.ALL_OK.value)
-    print("response from line server", res)
+    ## call manager bot to validate the x-line-signature
+    ok, bodyStr = managerBot.validate_signature(request)
+    ## call clerk bot to process the inbound body string
+    clerkBot = ClerkBot(IncomingPayload = bodyStr)
+    ok, message = clerkBot.getMessage()
+    if not ok:
+        ## call customer bot to inform user, maybe try to send message again 
+        pass
+    ## call manager bot to store the message into database
 
+    pass
 
 if __name__ == "__main__":
   uvicorn.run(
