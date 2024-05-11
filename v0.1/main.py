@@ -8,7 +8,7 @@ import uvicorn
 import yaml
 import json
 from fastapi import FastAPI, Request, HTTPException, Depends, status
-from models import Base, UserInfo, MessageRecords, ProcessMessage
+from rules import Base, UserInfo, MessageRecords, ProcessMessage
 from database import engine, db_session
 from handlers import ReplyMessageHandler, TextMessageHandler
 from sqlalchemy.orm import Session

@@ -2,7 +2,7 @@ import aiohttp
 import json
 from datetime import datetime
 from sqlalchemy.orm import Session
-from models import ProcessMessage, UserInfo, MessageRecords, HandleStatus
+from rules import ProcessMessage, UserInfo, MessageRecords, HandleStatus
 
 async def ReplyMessageHandler(
         reply_endpoint: str,

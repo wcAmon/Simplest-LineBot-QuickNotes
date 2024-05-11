@@ -1,80 +1,51 @@
-from ast import In
-from asyncio import events
 from datetime import datetime
-from enum import Enum
 import json
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, Tuple
 from sqlalchemy.orm import Session
 from fastapi import Request
 import base64
 import hashlib
 import hmac
+from handlers import ReplyMessageHandler, MessageRecordHandler
+from rules import ProcessMessage, MessageType, Message
 
-## enum MessageType for validation of message type in inbound 
-## payload
-class MessageType(Enum):
-    NULL = None
-    TEXT = "text"
-    IMAGE = "image"
-    AUDIO = "audio"
-    FILE = "file"
+## the senior officer bot only holds a custom dictionary call 
+## "configuration key", nothing more, nothing else
+class SeniorOfficerBot:
+    def __init__(self, configuration_key) -> None:
+        self.channel_secret = configuration_key.get("CHANNEL_SECRET")
+        self.channel_access_token = configuration_key.get("CHANNEL_ACCESS_TOKEN")
+        self.reply_endpoint = configuration_key.get("REPLY_ENDPOINT")
 
-## Message class holds the message content for process, because 
-## the image/audio/file message need to be fetch from the line 
-## data endpoint. See FetchDataDocument: https://developers.line.
-## biz/en/reference/messaging-api/#get-content
-class Message:
-    def __init__(self,
-                 msg_id: str = None, 
-                 msg_type: MessageType = MessageType.NULL, 
-                 msg_text: str = None, 
-                 msg_filename: str = None,
-                 msg_reply_token: str = "",
-                 msg_timestamp: datetime = datetime.now(),
-                 owner_id: str = None
-                 ) -> None:
-        if msg_id is None:
-            print("message initialize error, please verify.")
-            raise ValueError
-        self.msg_id = msg_id
-        self.msg_type = msg_type
-        if msg_text is None:
-            msg_text = "this is a file message"
-        self.msg_text = msg_text
-        if msg_filename is None:
-            msg_filename = "this is a text message"
-        self.msg_filename = msg_filename
-        self.msg_reply_token = msg_reply_token
-        self.msg_timestamp = msg_timestamp
-        self.owner_id = owner_id
-    def __str__(self) -> str:
-        if self.msg_type.value is None:
-            return "this is a null message"
-        return f"{self.msg_type.value} : {self.msg_id} : {self.msg_text} : {self.msg_filename}"
-
-##: the manager bot holds signature validation and database 
-##: operations. See VerifySignatureDocument: https://developers.
-##: line.biz/en/docs/messaging-api/receiving-messages/ 
+##: the manager bot is responsible for signature validation and 
+##: database operations. See VerifySignatureDocument: https://
+##: developers.line.biz/en/docs/messaging-api/receiving-messages/ 
 ##: #verify-signature
 class ManagerBot:
     def __init__(
             self,
-            Config: Dict[str, str],
-            DB: type[Session],
+            senior: SeniorOfficerBot,
+            DB: type[Session]
             ) -> None:
-        self.channel_secret = Config["CHANNEL_SECRET"]
-        self.channel_access_token = Config["CHANNEL_ACCESS_TOKEN"]
-        self.reply_endpoint = Config["REPLY_ENDPOINT"]
+        self.channel_secret = senior.channel_secret
+        self.channel_access_token = senior.channel_access_token
+        self.reply_endpoint = senior.reply_endpoint
         self.DB = DB
+        self.body_str = ""
+        self.outgoingPayload = Message(msg_id="0")
     def online(self) -> None:
         if self.channel_access_token == "" or self.channel_secret == "":
-            print("Manager bot sleeping...")
+            print("Manager bot sleeping...something went wrong!")
         else:
             print("Manager bot at your service!")
+    ## record the payload for further processing
+    def __record_payload(self, payload: Message) -> None:
+        self.outgoingPayload = payload
+    ## validate the x-line-signature    
     async def validate_signature(
             self, 
             request: Request
-            ) -> Tuple[bool, str]:
+            ) -> bool:
         ## Validate the x-line-signature
         body_bytes = await request.body()
         body = body_bytes.decode('utf-8')
@@ -83,16 +54,26 @@ class ManagerBot:
             body.encode('utf-8'), hashlib.sha256).digest()
         correct_signature = base64.b64encode(hash).decode()
         if signature != correct_signature:
-            return (False, "")
-        return (True, body)
+            return False
+        self.body_str = body
+        return True
+    ## deal error from other bots and decide what to do
+    def report_error(self, msg: Message) -> bool:
+        self.__record_payload(msg)
+
+    ## deal success from other bots
+    def report_success(self, msg: ProcessMessage) -> None:
+        print(f"Success: {msg.value}")
+
+    
 
 ## the clerk bot deals with every incoming message
 class ClerkBot:
     def __init__(
             self,
-            IncomingPayload: str
+            manager: ManagerBot
             ) -> None:
-        self.payload = json.load(IncomingPayload)
+        self.payload = json.load(manager.body_str)
         self.replyToken = ""
         self.webhookEventId = ""
         self.line_user_id = ""
@@ -127,10 +108,13 @@ class ClerkBot:
     def __process_message(self) -> Tuple[bool, Message]:
         ok, message = self.__process_events()
         if not ok:
-            return (False, )
+            return (False, Message(msg_id="", error_description="No valid message events received"))
         msgType = message.get("type")
         if msgType is None:
-            return (False, [{}])
+            return (False, Message(
+                msg_id="",
+                reply_token=self.replyToken, 
+                error_description="No valid message type found"))
         ## process the message based on the type: text, image, file, audio
         return (True, Message(
             msg_id = message.get("id"),
@@ -139,7 +123,8 @@ class ClerkBot:
             msg_filename = message.get("fileName"),
             msg_reply_token = self.replyToken,
             msg_timestamp= self.time_stamp,
-            owner_id = self.line_user_id
+            owner_id = self.line_user_id,
+            error_description = ""
         ))
     def __process_timestamp(self, timestamp: int) -> datetime:
         self.time_stamp = datetime.fromtimestamp(timestamp)
@@ -152,7 +137,69 @@ class CustomerBot:
     def __init__(
             self,
             manager: ManagerBot,
-            OutgoingPayload: str
             ) -> None:
         self.manager = manager
+        self.payload = manager.outgoingPayload
+    def __generate_reply_message(self) -> str:
+        if self.payload.error_description != "":
+            return f'we have a problem: {self.payload.error_description}'
+        return f'we have received and processed your {self.payload.msg_type} message.'
+    async def respond_message(self) -> Dict[str, str]:
+        reply_message = self.__generate_reply_message()
+        ## extract the reply token from the payload
+        reply_token = self.payload.msg_reply_token
+        if reply_token == "":
+            print("No reply token found, and the error description: ", reply_message)
+            return {}
+        ## call the reply message handler
+        res = await ReplyMessageHandler(
+            reply_endpoint=self.manager.reply_endpoint,
+            channel_access_token=self.manager.channel_access_token,
+            reply_token=reply_token,
+            message=reply_message
+        )
+        json_res = json.loads(res)
+        print(json_res)
+        return json_res
+    
+class StorageBot:
+    def __init__(
+            self,
+            manager: ManagerBot,
+            object_to_store: Message
+            ) -> None:
+        self.manager = manager
+        self.object_to_store = object_to_store
+    def __file_storage_operation(self) -> Tuple[bool, str]:
+        
         pass
+    def process_message(self) -> None:
+        if self.object_to_store.msg_type == MessageType.TEXT:
+            success, msg = MessageRecordHandler(
+                    db = self.manager.DB,
+                    message = self.object_to_store
+                )
+            if not success:
+                self.manager.report_error(msg)
+            else:
+                self.manager.report_success(msg)
+        else:
+            success, report = self.__file_storage_operation()
+            if not success:
+                self.manager.report_error(report)
+            else:
+                self.manager.report_success(report)
+
+## deal with file fetch from line data endpoint
+class DeliveryBot:
+    def __init__(
+            self,
+            manager: ManagerBot,
+            object_to_fetch: Message
+            ) -> None:
+        self.manager = manager
+        self.object_to_fetch = object_to_fetch
+    def __file_fetch_operation(self) -> Tuple[bool, str]:
+        FileFetchHandler()
+        pass
+

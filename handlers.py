@@ -2,7 +2,8 @@ import aiohttp
 import json
 from datetime import datetime
 from sqlalchemy.orm import Session
-from models import ProcessMessage, UserInfo, MessageRecords, HandleStatus
+from rules import ProcessMessage, UserInfo, MessageRecords, HandleStatus
+from rules import MessageType, Message
 
 async def ReplyMessageHandler(
         reply_endpoint: str,
@@ -28,18 +29,16 @@ async def ReplyMessageHandler(
         async with session.post(reply_endpoint, headers=headers, data=json.dumps(reqBody)) as response:
             return await response.text()
 
-
-def TextMessageHandler(
+## handle message write in database
+def MessageRecordHandler(
         db: type[Session], 
-        line_user_id: str, 
-        time_stamp: datetime, 
-        message: str
+        message: Message
         ) -> HandleStatus:
     ## Check if the user exists in the database, if not, create a new user
-    user_object = db.query(UserInfo).filter(UserInfo.lineUserId == line_user_id).first()
+    user_object = db.query(UserInfo).filter(UserInfo.lineUserId == message.owner_id).first()
     if not user_object:
         try:
-            new_user_info = UserInfo(lineUserId=line_user_id)
+            new_user_info = UserInfo(lineUserId=message.owner_id)
             db.add(new_user_info)
             db.commit()
             user_object = new_user_info
@@ -48,15 +47,19 @@ def TextMessageHandler(
             return HandleStatus(ProcessMessage.USER_CREATE_ERROR, False)
     ## Create a new message record
     try:
-        TextMessageRecord = MessageRecords(
+        MessageRecord = MessageRecords(
         userInfo_id=user_object.id,
-        lineUserId=line_user_id, 
-        message=message, 
-        timestamp=time_stamp
+        lineUserId=message.owner_id, 
+        message=message.msg_text,
+        filename=message.msg_filename, 
+        timestamp=message.msg_timestamp
         )
-        db.add(TextMessageRecord)
+        db.add(MessageRecord)
         db.commit()
     except Exception as e:
         print("database error", e)
         return HandleStatus(ProcessMessage.DATABASE_WRITE_ERROR, False)
     return HandleStatus(ProcessMessage.ALL_OK, True)
+
+## handle the fetch request to line-data endpoint for downloading 
+## image/audio/file

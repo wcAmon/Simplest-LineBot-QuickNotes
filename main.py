@@ -2,13 +2,11 @@
 from typing import Annotated
 import uvicorn
 import yaml
-import json
 from fastapi import FastAPI, Request, HTTPException, Depends, status
-from models import Base, UserInfo, MessageRecords, ProcessMessage
+from rules import Base, UserInfo, MessageRecords, ProcessMessage
 from database import engine, db_session
-from handlers import ReplyMessageHandler, TextMessageHandler
 from sqlalchemy.orm import Session
-from executors import ManagerBot, ClerkBot
+from executors import ManagerBot, ClerkBot, CustomerBot, SeniorOfficerBot, StorageBot
 
 ## Create sqlite data.db, but only if it doesn't exist
 Base.metadata.create_all(bind=engine)
@@ -23,36 +21,29 @@ db_driver = Annotated[Session, Depends(setup_db_session)]
 with open('../config.yaml') as file:
     config = yaml.safe_load(file)
 ## initialize the manager bot
-managerBot = ManagerBot(Config=config, DB=db_driver)
-managerBot.online()
+seniorBot = SeniorOfficerBot(config)
 ## Create a FastAPI instance
 app = FastAPI()
-
-@app.get("/", status_code = status.HTTP_200_OK)
-async def Users(db: db_driver):
-    db.query(UserInfo).all()
-
-## get user by line id
-@app.get("/users/", status_code = status.HTTP_200_OK)
-async def get_user_by_line_id(db: db_driver, lineUserId: str):
-    user_object = db.query(UserInfo).filter(UserInfo.lineUserId == lineUserId).first()
-    return user_object
-
+## place liff webpage here
 
 ## Define the webhook endpoint
 @app.post("/webhook", status_code = status.HTTP_200_OK)
 async def handleInboundMessage(request: Request, db: db_driver):
+    ## initialize the manager bot
+    managerBot = ManagerBot(
+        senior = seniorBot,
+        DB = db
+    )
     ## call manager bot to validate the x-line-signature
-    ok, bodyStr = managerBot.validate_signature(request)
-    ## call clerk bot to process the inbound body string
-    clerkBot = ClerkBot(IncomingPayload = bodyStr)
-    ok, message = clerkBot.getMessage()
+    ok = managerBot.validate_signature(request)
     if not ok:
-        ## call customer bot to inform user, maybe try to send message again 
-        pass
-    ## call manager bot to store the message into database
-
-    pass
+        raise HTTPException(status_code=400, detail="Invalid signature")
+    ## call clerk bot to process the inbound request string
+    clerkBot = ClerkBot(manager = managerBot)
+    ok, msg = clerkBot.getMessage()
+    if not ok:
+        managerBot.report_error(msg)
+        
 
 if __name__ == "__main__":
   uvicorn.run(
