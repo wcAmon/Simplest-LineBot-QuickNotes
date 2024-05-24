@@ -18,7 +18,7 @@ def setup_db_session():
         db.close()
 db_driver = Annotated[Session, Depends(setup_db_session)]
 ## Load the config file
-with open('../config.yaml') as file:
+with open('./config.yaml') as file:
     config = yaml.safe_load(file)
 ## initialize the manager bot
 seniorBot = SeniorOfficerBot(config)
